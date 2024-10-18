@@ -132,7 +132,7 @@ Key Benefits:
     for now, this is the best I can do for the moment...LOL
     
         
-    
+    <pre>
     +---------------------------------------+
     | Azure Resource Group (rg-blueharvest) |
     +---------------------------------------+
@@ -150,3 +150,4 @@ Key Benefits:
     | Azure Virtual Network   |
     | (VNet) + Subnet (snet)  |
     +-------------------------+
+</pre>
