@@ -133,9 +133,9 @@ Key Benefits:
     
         
     <pre>
-    +---------------------------------------+
-    | Azure Resource Group (rg-blueharvest) |
-    +---------------------------------------+
+    +----------------------+
+    | Azure Resource Group |
+    +----------------------+
                   |
     +--------------------------------+   
     | Azure Container Registry (ACR) |
