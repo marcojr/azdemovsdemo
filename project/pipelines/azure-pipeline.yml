@@ -1,0 +1,183 @@
+trigger:
+  branches:
+    include:
+      - main  # Trigger the pipeline on any changes to the 'main' branch
+
+pr:
+  branches:
+    include:
+      - main  # Enable the pipeline to run for pull requests targeting the 'main' branch
+
+parameters:
+  - name: environment  # Define a parameter for the environment (dev, sit, prod)
+    displayName: "Select Environment"
+    type: string
+    default: dev  # Default environment is set to 'dev'
+    values:
+      - dev
+      - sit
+      - prod
+
+jobs:
+- job: terraform_deploy
+  displayName: "Deploy Infrastructure using Terraform"  # The job name and description
+
+  pool: teste
+  
+
+  steps:
+    - checkout: self  # Checkout the repository containing the Terraform code
+
+    - task: UseDotNet@2  # Ensure .NET SDK is installed, required for running some scripts
+      inputs:
+        packageType: 'sdk'
+        version: '6.x'  # Use .NET 6.x
+        installationPath: $(Agent.ToolsDirectory)/dotnet
+
+    # Install Azure CLI
+    - task: Bash@3
+      displayName: "Install Azure CLI"
+      inputs:
+        targetType: 'inline'
+        script: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl apt-transport-https lsb-release gnupg
+          curl -sL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc.gpg > /dev/null
+          AZ_REPO=$(lsb_release -cs)
+          echo "deb [arch=amd64] https://packages.microsoft.com/repos/azure-cli/ $AZ_REPO main" | sudo tee /etc/apt/sources.list.d/azure-cli.list
+          sudo apt-get update
+          sudo apt-get install -y azure-cli
+
+    # Then proceed with Terraform steps
+
+
+    # Install Terraform CLI on the agent if it is not already installed
+    - task: Bash@3
+      condition: succeeded()
+      displayName: "Install Terraform"
+      inputs:
+        targetType: 'inline'
+        script: |
+          set -e
+          sudo apt-get update && sudo apt-get install -y gnupg software-properties-common
+          wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor | sudo tee /usr/share/keyrings/hashicorp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+          sudo apt-get update && sudo apt-get install terraform
+
+
+    # Initialize Terraform with the correct backend configuration for the environment
+    - task: AzureCLI@2
+      condition: succeeded()
+      displayName: "Terraform Init"
+      inputs:
+        scriptType: bash
+        addSpnToEnvironment: true
+        azureSubscription: 'Azure ARM Connection'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          set -e
+          export ARM_CLIENT_ID=$servicePrincipalId
+          export ARM_CLIENT_SECRET=$servicePrincipalKey
+          export ARM_TENANT_ID=$tenantId
+          export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+          echo "ARM_CLIENT_ID: $ARM_CLIENT_ID"
+          echo "ARM_CLIENT_SECRET: $ARM_CLIENT_SECRET"
+          echo "ARM_TENANT_ID: $ARM_TENANT_ID"
+          echo "ARM_SUBSCRIPTION_ID: $ARM_SUBSCRIPTION_ID"
+          export TF_LOG=DEBUG
+          cd project/terraform
+          terraform init -backend-config="backend-config-${{ parameters.environment }}.tfvars"
+
+          if [ $? -ne 0 ]; then
+            echo "Terraform Init failed!"
+            exit 1  
+          fi
+
+    # Run 'terraform plan' to generate and display the changes Terraform will make
+    - task: AzureCLI@2
+      condition: succeeded()
+      displayName: "Terraform Plan"
+      inputs:
+        scriptType: bash
+        addSpnToEnvironment: true
+        azureSubscription: 'Azure ARM Connection'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          set -e
+          export ARM_CLIENT_ID=$servicePrincipalId
+          export ARM_CLIENT_SECRET=$servicePrincipalKey
+          export ARM_TENANT_ID=$tenantId
+          export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+          echo "ARM_CLIENT_ID: $ARM_CLIENT_ID"
+          echo "ARM_CLIENT_SECRET: $ARM_CLIENT_SECRET"
+          echo "ARM_TENANT_ID: $ARM_TENANT_ID"
+          echo "ARM_SUBSCRIPTION_ID: $ARM_SUBSCRIPTION_ID"
+          cd project/terraform
+          terraform plan -var-file="${{ parameters.environment }}.tfvars"
+
+    # Run Terraform Apply only for dev and sit environments
+    - task: AzureCLI@2
+      displayName: "Terraform Apply"
+      condition: and(succeeded(), or(eq('${{ parameters.environment }}', 'dev'), eq('${{ parameters.environment }}', 'sit')))
+      inputs:
+        scriptType: bash
+        addSpnToEnvironment: true
+        azureSubscription: 'Azure ARM Connection'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          set -e
+          export ARM_CLIENT_ID=$servicePrincipalId
+          export ARM_CLIENT_SECRET=$servicePrincipalKey
+          export ARM_TENANT_ID=$tenantId
+          export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+          echo "ARM_CLIENT_ID: $ARM_CLIENT_ID"
+          echo "ARM_CLIENT_SECRET: $ARM_CLIENT_SECRET"
+          echo "ARM_TENANT_ID: $ARM_TENANT_ID"
+          echo "ARM_SUBSCRIPTION_ID: $ARM_SUBSCRIPTION_ID"
+          cd project/terraform
+          terraform apply -auto-approve -var-file="${{ parameters.environment }}.tfvars"
+
+    # Publish Terraform state file as an artifact if the apply fails
+    - publish: terraform/errored.tfstate
+      artifact: terraform_state
+      condition: failed()  # Only publish the state if the job fails
+
+# Separate job to handle production manually
+- job: terraform_apply_prod
+  displayName: "Manual Apply for Production"
+  dependsOn: terraform_deploy
+  condition: eq('${{ parameters.environment }}', 'prod')  # Only runs if 'prod' environment is selected
+  pool: teste
+
+  steps:
+    # Manual apply for production after approval in the Azure DevOps UI
+    - task: AzureCLI@2
+      condition: succeeded()
+      displayName: "Azure Login"
+      inputs:
+        azureSubscription: "Azure ARM Connection" 
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          echo "Successfully logged into Azure"
+
+    - task: AzureCLI@2
+      displayName: "Terraform Apply for Production"
+      inputs:
+        scriptType: bash
+        addSpnToEnvironment: true
+        azureSubscription: 'Azure ARM Connection'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          set -e
+          export ARM_CLIENT_ID=$servicePrincipalId
+          export ARM_CLIENT_SECRET=$servicePrincipalKey
+          export ARM_TENANT_ID=$tenantId
+          export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+          echo "ARM_CLIENT_ID: $ARM_CLIENT_ID"
+          echo "ARM_CLIENT_SECRET: $ARM_CLIENT_SECRET"
+          echo "ARM_TENANT_ID: $ARM_TENANT_ID"
+          echo "ARM_SUBSCRIPTION_ID: $ARM_SUBSCRIPTION_ID"
+          cd project/terraform
+          terraform apply -auto-approve -var-file="prod.tfvars"
